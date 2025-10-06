@@ -4,47 +4,61 @@ from dotenv import load_dotenv
 from huggingface_hub import login
 from transformer_lens import HookedTransformer
 from sae_lens import SAE
-from sae_lens import list_pretrained_saes
-
-for sae in list_pretrained_saes():
-    print(sae)
+from src.download_data import load_finqa_from_disk
+import torch.nn.functional as F
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-hf_token = os.getenv("HUGGINS_FACE_TOKEN")
-
+load_dotenv()
+hf_token = os.getenv("HUGGINGFACE_TOKEN")
 login(hf_token)
-## requires manual download, first time model is used
-## how to delete again find folder and delete, C:\Users\<you>\.cache\huggingface\hub\models--TinyLlama--TinyLlama-1.1B-Chat-v1.0
-## according to the chat
-TINY_TEST_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-## has to set up hugging face account and accept terms of use, and request model access
-# to use big boy model
+
+
+
+train_data = load_finqa_from_disk("FinQA/dataset/train.json")
+
+
+sample = train_data.shuffle(seed=42)[0]
+if isinstance(sample["table"], list):
+    # Join rows nicely
+    table_text = "\n".join([" | ".join(map(str, row)) for row in sample["table"]])
+else:
+    table_text = str(sample["table"])
+
+context = f"{sample['pre_text']}\n{table_text}\n{sample['post_text']}"
+prompt = f"Context:\n{context}\n\nQuestion: {sample['question']}\nAnswer:"
+
+
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
-
-TARGET_LAYER = 12 
-
-## setup
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
+TARGET_LAYER = 12
 model = HookedTransformer.from_pretrained(MODEL_NAME, device=device)
-print(sae.cfg)  # or sae.cfg.__dict__
+
+sae_release = "seonglae/Llama-3.2-1B-sae"
+sae_id = "Llama-3.2-1B_blocks.12.hook_resid_pre_14336_topk_48_0.0002_49_fineweb_512"
+sae, cfg_dict, sparsity = SAE.from_pretrained(sae_release, sae_id, device=device)
 
 
-# only certain pretrained SAEs are available, and they have to match layer and dum stuff in weird ways,
-# i suppose this works now maybe, i geuss?????
-### omg this takes forever to load, fuck off
-# apparently this works only with layer 12, i cant be botherd to find sae that works on later layers
-sae, cfg_dict, sparsity = SAE.from_pretrained("seonglae/Llama-3.2-1B-sae", "Llama-3.2-1B_blocks.12.hook_resid_pre_14336_topk_48_0.0002_49_fineweb_512")
-
-prompt = "The financial markets crashed because investors panicked."
+# tokenize and get activations
 tokens = model.to_tokens(prompt)
-_, cache = model.run_with_cache(tokens, remove_batch_dim=True)
-
-# getting the activation from the specified layer, 12
-acts = cache["resid_pre", TARGET_LAYER]  
+logits, cache = model.run_with_cache(tokens, remove_batch_dim=False, return_type="logits")
+acts = cache["resid_pre", TARGET_LAYER]
 
 
 feature_acts = sae.encode(acts)
 feature_mean = feature_acts.mean().item()
 feature_std = feature_acts.std().item()
+
+
+topk_values, topk_indices = torch.topk(feature_acts.mean(dim=0), k=10)
+
+for val, idx in zip(topk_values, topk_indices):
+    print(f"Feature {idx.item():>6} | Activation {val.item():.4f}")
+
+
+log_probs = F.log_softmax(logits, dim=-1)
+
+target_tokens = tokens[:, 1:]
+pred_log_probs = log_probs[:, :-1, :]
+
+token_log_probs = pred_log_probs.gather(2, target_tokens.unsqueeze(-1)).squeeze(-1)
+
+nll_per_token = -token_log_probs

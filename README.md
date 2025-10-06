@@ -5,6 +5,8 @@ This is code for a paper about llm and how entaglement, collission, and superpos
 
 
 ## how to use
-install the venv, and also manually run this line in cli:
-    uv pip install git+https://github.com/jbloomAus/SAELens.git
-do not know why, but has to be done like this, cant be in the toml
+install the venv.
+
+maybe need to run this to get the data:
+      git clone https://github.com/czyssrs/FinQA.git
+    dont know i cant push it to main
