@@ -859,6 +859,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "altair" },
     { name = "altair-viewer" },
+    { name = "datasets" },
     { name = "dotenv" },
     { name = "huggingface-hub", extra = ["hf-xet"] },
     { name = "ipykernel" },
@@ -877,6 +878,7 @@ dependencies = [
 requires-dist = [
     { name = "altair", specifier = ">=5.5.0" },
     { name = "altair-viewer", specifier = ">=0.4.0" },
+    { name = "datasets", specifier = ">=4.1.1" },
     { name = "dotenv" },
     { name = "huggingface-hub", extras = ["hf-xet"], specifier = ">=0.35.3" },
     { name = "ipykernel", specifier = ">=6.30.1" },
