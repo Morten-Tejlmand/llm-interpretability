@@ -20,6 +20,7 @@ dependencies = [
     "altair>=5.5.0",
     "altair-viewer>=0.4.0",
     "datasets>=4.1.1",
+    "scikit-learn>=1.7.2",
 ]
 
 [tool.uv.sources]
