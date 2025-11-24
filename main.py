@@ -60,7 +60,7 @@ prompts = [
 # =========================
 # LOAD MODEL + SAE
 # =========================
-login("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")
+login(token=os.getenv("HUGGINGFACE_TOKEN"))
 
 model = HookedTransformer.from_pretrained_no_processing(
     model_name=MODEL_NAME, device=device, dtype=DTYPE
