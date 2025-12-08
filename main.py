@@ -1,5 +1,3 @@
-print("running optimized version...")
-
 import os
 import random
 import numpy as np
@@ -19,7 +17,7 @@ import json
 import pickle
 import lzma
 
-# CONFIG
+# config
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
@@ -28,10 +26,14 @@ torch.manual_seed(SEED)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16 if device == "cuda" else torch.float32
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B"                                                      
-SAE_RELEASE = "seonglae/Llama-3.2-1B-sae"
-SAE_ID = "Llama-3.2-1B_blocks.12.hook_resid_pre_14336_topk_48_0.0002_49_fineweb_512"
-TARGET_LAYER = 12
+# MODEL_NAME = "meta-llama/Llama-3.2-1B"                                                      
+# SAE_RELEASE = "seonglae/Llama-3.2-1B-sae"
+#SAE_ID = "Llama-3.2-1B_blocks.12.hook_resid_pre_14336_topk_48_0.0002_49_fineweb_512"
+MODEL_NAME = 'gpt2-small'
+SAE_RELEASE = "gpt2-small-resid-post-v5-32k"
+SAE_ID = 'blocks.0.hook_resid_post'
+
+TARGET_LAYER = 0
 
 N_SAMPLES = 100
 TOPK_PER_FEATURE = 250
@@ -40,19 +42,41 @@ MAX_POSITIONS_FOR_COS_SIM = 8000
 
 os.makedirs("outputs", exist_ok=True)
 
-df_wiki = pl.read_csv("wikipedia_data.csv")
-df_wiki = df_wiki.filter(pl.col("text").str.len_chars() > 10)
+def sample_with_ratio(df, ratio=0.7, target_col="is_runtime_collision", total=1000, seed=42):
+    """
+    Returns a sample with class ratio = (ratio : 1-ratio).
+    ratio = proportion of class 1 (runtime collision).
+    total = total number of samples in output.
 
-pool = [row["text"] for row in df_wiki.to_dicts()]
+    Automatically oversamples the minority class when needed.
+    """
+    np.random.seed(seed)
 
-samples = random.sample(pool, min(N_SAMPLES, len(pool)))
+    target1 = int(total * ratio)
+    target0 = total - target1
+
+    df0 = df[df[target_col] == 0]
+    df1 = df[df[target_col] == 1]
+
+    s0 = df0.sample(n=target0, replace=(len(df0) < target0), random_state=seed)
+    s1 = df1.sample(n=target1, replace=(len(df1) < target1), random_state=seed)
+
+    return pd.concat([s0, s1], ignore_index=True).sample(frac=1, random_state=seed)
+
+
+df_wiki = pl.read_csv("runtime_collision_results/gpt2-small/runtime_collision_prompts.csv")
+df_wiki_pd = df_wiki.to_pandas()
+
+sample_rows = sample_with_ratio(df_wiki_pd, ratio=0.65, total=N_SAMPLES, seed=SEED)
+
 prompts = [
     f"Context:\n{s}\n\nQuestion: Summarize the above text.\nAnswer:"
-    for s in samples
-]   
+    for s in sample_rows["text"]
+]
 
-# LOAD MODEL + SAE
-login(token="")
+
+# load env variables
+#login(token="")
 
 model = HookedTransformer.from_pretrained_no_processing(
     model_name=MODEL_NAME, device=device, dtype=DTYPE
@@ -66,7 +90,7 @@ sae, cfg_dict, sparsity = SAE.from_pretrained_with_cfg_and_sparsity(
 )
 sae = sae.to(dtype=DTYPE)
 
-# TOKENIZE
+# tokenize
 tokens = model.to_tokens(prompts).to(device)
 labels = tokens.clone().to(device)
 pad_id = model.tokenizer.pad_token_id or 0
@@ -74,14 +98,14 @@ pad_id = model.tokenizer.pad_token_id or 0
 # save tokens for later risk modeling
 torch.save(tokens.cpu(), "outputs/tokens.pt")
 
-# BASELINE FORWARD (hook only target layer)
+# baseline logits
 with torch.no_grad():
     logits, cache = model.run_with_cache(
         tokens,
         return_type="logits",
         names_filter=[f"blocks.{TARGET_LAYER}.hook_resid_pre"]
     )
-# Move logits + labels to CPU
+# move logits + labels to cpu
 logits = logits.to("cpu")
 labels = labels.to("cpu")
 
@@ -99,7 +123,7 @@ base_loss = xent_masked(shift_logits, shift_labels, mask)
 ppl_base = torch.exp(base_loss).item()
 print(f"Baseline Perplexity: {ppl_base:.4f}")
 
-# EXTRACT HOOKED ACTIVATION
+# extract hooked activation
 acts = cache[f"blocks.{TARGET_LAYER}.hook_resid_pre"].detach().cpu()
 del cache
 torch.cuda.empty_cache()
@@ -112,7 +136,7 @@ del sae_cpu
 
 feature_acts_flat = feature_acts.reshape(-1, feature_acts.size(-1))
 
-# POLY SCORE FROM DECODER SPARSITY
+# poly score from decoder sparsity
 W_dec = sae.W_dec.T.detach().cpu()
 decoder_l2 = torch.norm(W_dec, p=2, dim=0)
 decoder_l1 = torch.norm(W_dec, p=1, dim=0)
@@ -121,7 +145,7 @@ poly_score_decoder = decoder_l1 / (decoder_l2 + 1e-12)
 nF = feature_acts.size(-1)
 cand_idx = torch.topk(poly_score_decoder, k=min(CANDIDATE_FEATURES_FOR_ENTROPY, nF)).indices
 
-# CLUSTERING ON TOP-K POSITIONS (AND SAVE CLUSTERS)
+# clustering on top-k activations
 tokens_flat = tokens.reshape(-1).detach().cpu().numpy().astype(np.int32)
 token_embeddings = model.W_E.detach().to(torch.float32).cpu().numpy()
 
@@ -197,8 +221,6 @@ per_prompt_loss_base = per_prompt_loss_fn(logits)
 
 per_prompt_ppl_base = torch.exp(per_prompt_loss_base).cpu().numpy()
 
-# FEATURE STRENGTH
-
 # SAVE LOGITS
 torch.save(logits, "outputs/logits_baseline.pt")
 
@@ -206,7 +228,10 @@ torch.save(logits, "outputs/logits_baseline.pt")
 df_training = pd.DataFrame({
     "prompt": prompts,
     "ppl_base": per_prompt_ppl_base,
+    "original_index": sample_rows.index.values,
+    "is_runtime_collision": sample_rows["is_runtime_collision"].values,
 })
+
 
 df_training.to_csv("outputs/training_dataset.csv", index=False)
 print("Saved training dataset to outputs/training_dataset.csv")
@@ -238,10 +263,11 @@ print("Saved summary table to outputs/summary_metrics.csv")
 
 
 # PER-PROMPT POLYSEMANTIC IMPACT
-
 df_pp = pd.DataFrame({
     "prompt": prompts,
     "ppl_base": per_prompt_ppl_base,
+    "original_index": sample_rows.index.values,
+    "is_runtime_collision": sample_rows["is_runtime_collision"].values,
 })
 
 

@@ -5,8 +5,8 @@ import torch
 import pickle
 import lzma
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 # ============================================================
 # CONFIG
@@ -37,7 +37,7 @@ cand_features = sorted(int(k) for k in cluster_results_raw.keys())
 
 df_training = pd.read_csv(TRAINING_DATA_PATH)
 per_prompt_ppl_base = df_training["ppl_base"].values
-
+per_prompt_run_collision = df_training["is_runtime_collision"].values.astype(np.bool_)
 tokens = torch.load(TOKENS_PATH).cpu()
 n_prompts, seq_len = tokens.shape
 
@@ -214,37 +214,72 @@ X = np.vstack([
     prompt_length_tokens,
     polysemantic_ratio,
 ]).T
-y = per_prompt_ppl_base
+y = per_prompt_run_collision
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=SEED
+x_train, x_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=SEED
 )
 
-model = RandomForestRegressor(
+model = RandomForestClassifier(
     n_estimators=300,
     random_state=SEED,
     max_depth=12,
-    min_samples_leaf=3
+    min_samples_leaf=3,
+    class_weight="balanced"
 )
 
-model.fit(X_train, y_train)
-preds = model.predict(X_test)
+model.fit(x_train, y_train)
+probs = model.predict_proba(x_test)[:, 1]
+preds = (probs > 0.5).astype(int)
 
 # ========================================================
-# EVALUATION METRICS
+# CLASSIFICATION METRICS
 # ========================================================
-mae = mean_absolute_error(y_test, preds)
-rmse = np.sqrt(mean_squared_error(y_test, preds))
-mape = np.mean(np.abs((y_test - preds) / y_test)) * 100
-r2 = r2_score(y_test, preds)
+acc = accuracy_score(y_test, preds)
+prec = precision_score(y_test, preds, zero_division=0)
+rec = recall_score(y_test, preds, zero_division=0)
+f1 = f1_score(y_test, preds, zero_division=0)
+auc = roc_auc_score(y_test, probs)
 
-print("\n=== REGRESSION METRICS ===")
-print(f"MAE:  {mae:.4f}")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAPE: {mape:.2f}%")
-print(f"R²:   {r2:.4f}")
+print("\n=== CLASSIFICATION METRICS ===")
+print(f"Accuracy:  {acc:.4f}")
+print(f"Precision: {prec:.4f}")
+print(f"Recall:    {rec:.4f}")
+print(f"F1-score:  {f1:.4f}")
+print(f"AUC:       {auc:.4f}")
 
 # Save model
 import joblib
-joblib.dump(model, "outputs/prompt_ppl_regressor.joblib")
-print("Saved model to outputs/prompt_ppl_regressor.joblib")
+joblib.dump(model, "outputs/runtime_collision_classifier.joblib")
+print("Saved model to outputs/runtime_collision_classifier.joblib")
+
+# y_test and preds are in test-split order,
+# so we must recover the original prompt indices used in the split.
+
+test_indices = y_test.index if isinstance(y_test, pd.Series) else None
+# If y_test is a numpy array, generate the mapping manually:
+if test_indices is None:
+    # Re-run split but return indices
+    _, X_test_idx = train_test_split(
+        np.arange(len(y)), test_size=0.2, random_state=SEED
+    )
+    test_indices = X_test_idx
+
+# Build DataFrame
+df_pred = pd.DataFrame({
+    "prompt_index": test_indices,
+    "true_target": y_test,
+    "predicted_label": preds,
+    "predicted_prob": probs,
+})
+
+# Add global metrics duplicated across rows for easy logging/analysis
+df_pred["accuracy"] = acc
+df_pred["precision"] = prec
+df_pred["recall"] = rec
+df_pred["f1"] = f1
+df_pred["auc"] = auc
+
+# Save
+df_pred.to_csv("outputs/runtime_collision_predictions.csv", index=False)
+print("Saved detailed prediction table to outputs/runtime_collision_predictions.csv")

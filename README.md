@@ -8,10 +8,5 @@ This is code for a paper about LLMs and how entanglement, collision, and superpo
 
 Install the virtual environment.
  
-You may need to run this to get the data:
-
-```bash
-git clone https://github.com/czyssrs/FinQA.git
-```
 
 Don't know, I can't push it to main.
